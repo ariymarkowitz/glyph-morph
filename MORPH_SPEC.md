@@ -88,8 +88,8 @@ outside the glyph's own filled region), Neumann at image borders. Standard
 the solution strictly in `(0, 1)`. Smoother than geodesic, but it **saturates
 across thin strokes**, so it is *not* linear along a stem — pair it with §5.
 
-**Normalisation offset.** When normalising a component, place the seed and tip
-*strictly inside* `(0, 1)` (e.g. map distances via `(d + 0.5)/(dmax + 1)`)
+**Normalisation offset.** When normalising a component, map its minimum and
+maximum distances *strictly inside* `(0, 1)` (e.g. via `(d + 0.5)/(dmax + 1)`)
 rather than at the exact ends. This ensures no pixel switches exactly at `t = 0`
 or `t = 1` (avoiding a jump out of a held end frame), and makes a single-pixel
 component map to `0.5` — flipping mid-morph, where the stray specks left by
