@@ -12,7 +12,7 @@ to the implementer.
 
 ## 1. Core idea
 
-The morph is **not** a cross-fade or a vector interpolation. It is a *spatial
+The morph is a *spatial
 sweep*: the regions where the two glyphs differ are switched on/off
 progressively as a soft "front" sweeps across them, while the shared interior
 stays solid throughout. The result reads as one shape growing/retracting into
@@ -47,10 +47,7 @@ of the two alpha images — i.e. the shift maximising total overlapping ink:
 score[shift] = Σ_pixels A · (B shifted by `shift`)
 ```
 
-Use the **raw** sum, *not* a normalised correlation (NCC): normalisation tends
-to slide one glyph nearly off the other to line up a single strong sliver,
-whereas the raw sum keeps the bulk of the ink overlapping (important for glyphs
-with repeated strokes, e.g. whole words). Then paste both glyphs onto a canvas
+Then paste both glyphs onto a canvas
 sized to fit their union, B at the chosen offset.
 
 Alignment is just a convenience; the morph proper only requires two equal-shaped
