@@ -1,12 +1,12 @@
 # Glyph Morphing — Implementation Specification
 
-A language-independent description of the algorithm that animates a smooth,
+A description of the algorithm that animates a smooth,
 anti-aliased morph between two glyph images (e.g. `e` → `d`), controlled by a
 parameter `t ∈ [0, 1]` with `t = 0` showing glyph A and `t = 1` showing glyph B.
 
-This covers the ideas and the non-obvious design decisions; routine details
-(array bookkeeping, exact index arithmetic, standard discretisations) are left
-to the implementer.
+This is a rough outline of the ideas and the non-obvious design decisions involved.
+All of the work was vibe-coded (including most of this document) so it's probably more
+worth it to read this document than the source code.
 
 ---
 
