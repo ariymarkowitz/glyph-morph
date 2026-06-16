@@ -76,18 +76,15 @@ def main() -> None:
             pass
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(1, 3, figsize=(12, 5))
-        axes[0].imshow(alpha_a, cmap="gray_r"); axes[0].set_title(f"glyph A: '{char_a}'")
-        axes[1].imshow(alpha_b, cmap="gray_r"); axes[1].set_title(f"glyph B: '{char_b}'")
-        axes[2].imshow(rgb)
-        axes[2].set_title(f"overlay  (dx={result.dx}, dy={result.dy})")
-        for ax in axes:
-            ax.set_xticks([]); ax.set_yticks([])
-        fig.tight_layout()
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.imshow(rgb)
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_axis_off()
+        fig.tight_layout(pad=0)
 
         if matplotlib.get_backend().lower() in ("agg",):
             out = "overlay.png"
-            fig.savefig(out, dpi=120)
+            fig.savefig(out, dpi=120, bbox_inches="tight", pad_inches=0)
             print(f"No interactive backend; saved {out}")
         else:
             plt.show()
