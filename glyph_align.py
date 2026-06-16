@@ -25,8 +25,8 @@ class Alignment:
     Attributes:
         dx: Horizontal shift (columns) to apply to B. Positive = rightwards.
         dy: Vertical shift (rows) to apply to B. Positive = downwards.
-        score: Correlation score at the chosen displacement (normalised to
-            [-1, 1] when ``normalize=True``, otherwise an unnormalised sum).
+        score: Raw correlation score (total overlapping ink) at the chosen
+            displacement.
     """
 
     dx: int
@@ -68,21 +68,18 @@ def _cross_correlate(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def align_glyphs(
     alpha_a: np.ndarray,
     alpha_b: np.ndarray,
-    *,
-    normalize: bool = True,
-    min_overlap_frac: float = 0.2,
 ) -> Alignment:
     """Find the displacement of B that maximises cross-correlation with A.
+
+    Uses the raw (unnormalised) correlation sum, which is the total overlapping
+    ink at each displacement -- so the chosen alignment is the one that overlaps
+    the two glyphs the most. Unlike a normalised score (NCC), this won't slide
+    one glyph almost off the other to line up a single strongly-correlated
+    sliver, which matters for glyphs of repeated strokes (e.g. whole words).
 
     Args:
         alpha_a: 2-D float array (alpha of glyph A), values in [0, 1].
         alpha_b: 2-D float array (alpha of glyph B), values in [0, 1].
-        normalize: If True, use normalised cross-correlation (NCC) so that the
-            score is independent of glyph brightness and overlap area. If False,
-            use the raw correlation sum (biased toward large overlaps).
-        min_overlap_frac: Reject displacements whose overlapping area is below
-            this fraction of the maximum possible overlap. This avoids the
-            degenerate "tiny corner overlap scores 1.0" artefact of NCC.
 
     Returns:
         An ``Alignment`` with the integer shift ``(dx, dy)`` for glyph B.
@@ -94,27 +91,8 @@ def align_glyphs(
 
     hb, wb = b.shape
 
-    # Numerator: sum of a*b over the overlapping region at each displacement.
-    num = _cross_correlate(a, b)
-
-    if normalize:
-        ones_a = np.ones_like(a)
-        ones_b = np.ones_like(b)
-        # Energy of the part of A that overlaps B's footprint, and vice versa.
-        energy_a = _cross_correlate(a * a, ones_b)
-        energy_b = _cross_correlate(ones_a, b * b)
-        # Pixel count of the overlap at each displacement.
-        overlap = _cross_correlate(ones_a, ones_b)
-
-        eps = 1e-9
-        denom = np.sqrt(np.maximum(energy_a, 0.0) * np.maximum(energy_b, 0.0))
-        score_map = num / (denom + eps)
-
-        # Suppress displacements with too little overlap.
-        score_map = np.where(overlap >= min_overlap_frac * overlap.max(),
-                             score_map, -np.inf)
-    else:
-        score_map = num
+    # Sum of a*b over the overlapping region at each displacement.
+    score_map = _cross_correlate(a, b)
 
     pi, pj = np.unravel_index(int(np.argmax(score_map)), score_map.shape)
     lag_row = pi - (hb - 1)
