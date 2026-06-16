@@ -14,7 +14,7 @@ worth it to read this document than the source code.
 
 The morph is a *spatial
 sweep*: the regions where the two glyphs differ are switched on/off
-progressively as a soft "front" sweeps across them, while the shared interior
+progressively as a soft "front" sweeps across them, while the shared interior (the "core")
 stays solid throughout. The result reads as one shape growing/retracting into
 the other.
 
