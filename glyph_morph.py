@@ -11,7 +11,9 @@ Steps:
    from the core (normalised to [0, 1]); its level sets are wavefronts at
    constant arc length, so along an extended segment (the stem of a 'd', say)
    the morph front advances at a constant rate when ``t`` is swept linearly.
-   A harmonic (Laplace) field is also available via ``field="harmonic"``.
+   A harmonic (Laplace) field is also available via ``field="harmonic"``; it is
+   reparametrised per component (see :func:`equalize_area`) so each component's
+   visible area still changes linearly in ``t`` despite the field saturating.
 
 3. Turn that into a per-pixel switch schedule ``T(x)`` -- the value of ``t`` at
    which the pixel flips between glyphs -- and at each ``t`` emit the hard
@@ -100,6 +102,41 @@ def _normalised_distance(region: np.ndarray, core: np.ndarray) -> np.ndarray:
     return out
 
 
+def equalize_area(depth: np.ndarray, region: np.ndarray) -> np.ndarray:
+    """Reparametrise ``depth`` per component so swept area is linear in level.
+
+    Each connected component of ``region`` has its depth values replaced by
+    their empirical CDF (rank-based histogram equalisation): the pixel with the
+    ``k``-th smallest depth (of ``m`` pixels) is mapped to ``(k + 0.5) / m``.
+
+    This preserves the *ordering* of the original field -- the same pixels
+    switch in the same sequence -- but rescales the timing. Because the values
+    are now uniform on (0, 1), the number of pixels with ``depth <= x`` is
+    exactly ``x * m``, so the component's visible area grows/shrinks at a
+    constant rate as ``t`` is swept linearly. This straightens out fields that
+    are non-linear in area (notably the harmonic field, which saturates across
+    thin strokes and so otherwise makes components vanish/appear suddenly at one
+    end of the morph and crawl at the other).
+
+    The ``+ 0.5`` / ``m`` offset keeps every value strictly inside (0, 1), as in
+    :func:`_normalised_distance`, so no pixel switches exactly at ``t=0`` / ``1``.
+    """
+    out = np.array(depth, dtype=float)
+    labels, n = ndimage.label(region)
+    for lab in range(1, n + 1):
+        comp = labels == lab
+        d = depth[comp]
+        m = d.size
+        # rank[i] = number of component pixels with a strictly smaller depth
+        # (ties broken arbitrarily but stably); the empirical CDF is then
+        # (rank + 0.5) / m, uniform on (0, 1).
+        order = np.argsort(d, kind="stable")
+        rank = np.empty(m, dtype=np.int64)
+        rank[order] = np.arange(m)
+        out[comp] = (rank + 0.5) / m
+    return out
+
+
 def solve_harmonic(unknown: np.ndarray, one_mask: np.ndarray) -> np.ndarray:
     """Solve Laplace's equation on ``unknown`` with Dirichlet data.
 
@@ -170,6 +207,12 @@ class GlyphMorph:
             ``"harmonic"`` solves Laplace's equation (0 on the core, 1 on the
             glyph outline); smooth, but it saturates across thin strokes so the
             front is not linear along a stem.
+        equalize: For the ``"harmonic"`` field, reparametrise each component's
+            depth via :func:`equalize_area` so its visible area changes at a
+            constant rate as ``t`` is swept (default ``True``). Without this the
+            saturating harmonic field makes components shrink/grow suddenly at
+            one end of the morph and crawl at the other. Ignored for
+            ``"geodesic"``, which is already built to be linear along a stem.
     """
 
     def __init__(
@@ -179,6 +222,7 @@ class GlyphMorph:
         *,
         threshold: float = 0.5,
         field: str = "geodesic",
+        equalize: bool = True,
     ) -> None:
         a = np.asarray(alpha_a)
         b = np.asarray(alpha_b)
@@ -197,6 +241,9 @@ class GlyphMorph:
         elif field == "harmonic":
             depth_a = solve_harmonic(self.a_only, one_mask=~mask_a)
             depth_b = solve_harmonic(self.b_only, one_mask=~mask_b)
+            if equalize:
+                depth_a = equalize_area(depth_a, self.a_only)
+                depth_b = equalize_area(depth_b, self.b_only)
         else:
             raise ValueError("field must be 'geodesic' or 'harmonic'")
 
