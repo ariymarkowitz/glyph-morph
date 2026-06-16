@@ -1,4 +1,4 @@
-"""Morph between two aligned glyph images (binary, no antialiasing).
+"""Morph between two aligned glyph images, with anti-aliased output.
 
 Steps:
 
@@ -16,11 +16,23 @@ Steps:
    visible area still changes linearly in ``t`` despite the field saturating.
 
 3. Turn that into a per-pixel switch schedule ``T(x)`` -- the value of ``t`` at
-   which the pixel flips between glyphs -- and at each ``t`` emit the hard
-   silhouette: core, plus not-yet-eroded A-only, plus already-grown B-only.
+   which the pixel flips between glyphs.
 
-The output is a 0/1 mask. ``mask(0)`` is glyph A's threshold mask and
-``mask(1)`` is glyph B's. No antialiasing is applied.
+4. Anti-alias the output. The hard silhouette would flip whole pixels on at
+   once, giving jagged edges that crawl pixel-by-pixel as ``t`` is swept. Two
+   things produce edges in a frame: the *static outline* (where the glyph meets
+   the background) and the *moving front* (the level set ``T = t`` sweeping
+   across an exclusive region). The static outline is anti-aliased by reusing
+   the glyphs' own (already anti-aliased) alpha. The moving front is given a
+   ~1px-wide soft edge: ``(T - t)`` divided by the local spacing of ``T``'s
+   level sets (precomputed, ~ ``|grad T|``) is the signed distance from the
+   pixel centre to the front in pixel units, which maps straight to a coverage
+   fraction. The front therefore advances continuously and sub-pixel as ``t``
+   changes, so the animation is smooth and free of crawling/popping, while the
+   shared interior stays fully solid.
+
+The output is a coverage mask in [0, 1]. ``mask(0)`` is glyph A's anti-aliased
+alpha and ``mask(1)`` is glyph B's.
 """
 
 from __future__ import annotations
@@ -194,8 +206,33 @@ def solve_harmonic(unknown: np.ndarray, one_mask: np.ndarray) -> np.ndarray:
     return u
 
 
+def _level_spacing(field: np.ndarray, region: np.ndarray) -> np.ndarray:
+    """Local spacing of ``field``'s level sets on ``region`` (~ ``|grad field|``).
+
+    For each pixel, the mean absolute difference of ``field`` to its in-region
+    4-neighbours. On a linear ramp this is exactly the per-pixel slope, i.e. how
+    much ``field`` changes between adjacent pixels; its reciprocal is how many
+    pixels the ``field = c`` level set moves when ``c`` changes by one. Computed
+    only from in-region neighbours so the discontinuity at the region's border
+    (where ``field`` jumps to its out-of-region value) never leaks in. Zero
+    outside ``region`` and on isolated single pixels.
+    """
+    total = np.zeros_like(field, dtype=float)
+    count = np.zeros_like(field, dtype=float)
+    for dy, dx in _NEIGHBOURS:
+        nbr = np.roll(np.roll(field, -dy, axis=0), -dx, axis=1)
+        nbr_in = np.roll(np.roll(region, -dy, axis=0), -dx, axis=1)
+        valid = region & nbr_in
+        total[valid] += np.abs(field - nbr)[valid]
+        count[valid] += 1.0
+    spacing = np.zeros_like(field, dtype=float)
+    nz = count > 0
+    spacing[nz] = total[nz] / count[nz]
+    return spacing
+
+
 class GlyphMorph:
-    """Precomputed binary morph between two aligned alpha images.
+    """Precomputed anti-aliased morph between two aligned alpha images.
 
     Both inputs must share the same shape (align them first, e.g. with
     :func:`glyph_align.align_glyphs` + :func:`glyph_align.overlay`).
@@ -213,6 +250,9 @@ class GlyphMorph:
             saturating harmonic field makes components shrink/grow suddenly at
             one end of the morph and crawl at the other. Ignored for
             ``"geodesic"``, which is already built to be linear along a stem.
+        aa_width: Width, in pixels, of the soft edge given to the moving front
+            (default ``1.0``). Larger values blur the front more; smaller values
+            sharpen it toward the hard binary silhouette.
     """
 
     def __init__(
@@ -223,11 +263,17 @@ class GlyphMorph:
         threshold: float = 0.5,
         field: str = "geodesic",
         equalize: bool = True,
+        aa_width: float = 1.0,
     ) -> None:
-        a = np.asarray(alpha_a)
-        b = np.asarray(alpha_b)
+        a = np.asarray(alpha_a, dtype=float)
+        b = np.asarray(alpha_b, dtype=float)
         if a.shape != b.shape:
             raise ValueError("images must have the same shape")
+
+        # Keep the glyphs' own anti-aliased alpha to render the static outlines.
+        self.alpha_a = np.clip(a, 0.0, 1.0)
+        self.alpha_b = np.clip(b, 0.0, 1.0)
+        self.aa_width = float(aa_width)
 
         mask_a = a >= threshold
         mask_b = b >= threshold
@@ -247,26 +293,70 @@ class GlyphMorph:
         else:
             raise ValueError("field must be 'geodesic' or 'harmonic'")
 
-        # Switch schedule T(x): the value of t at which a pixel flips.
-        #   A-only: erode from the outline (depth=1 -> T=0) toward the core.
-        #   B-only: grow from the core (depth=0 -> T=0) toward the outline.
-        T = np.zeros(a.shape)
-        T[self.a_only] = 1.0 - depth_a[self.a_only]
-        T[self.b_only] = depth_b[self.b_only]
-        self.T = T
+        # Every frame is a per-pixel blend  (1 - s)*alpha_a + s*alpha_b , where
+        # the switch fraction s(x, t) sweeps 0 -> 1 as the morph front crosses x.
+        # We build a switch *centre* Ts(x) -- the t at which the pixel is half
+        # switched -- and a *width* W(x) in t, then s is a clamped ramp of
+        # (t - Ts) / W. Because s makes a sharp (~1px) spatial front, only a
+        # one-pixel band is ever a partial mix of the two glyphs, so there is no
+        # ghosting; everywhere else the pixel is wholly one glyph or the other.
+        #   A-only erodes from the outline (Ts ~ 0) inward to the core (Ts ~ 1).
+        #   B-only grows from the core (Ts ~ 0) outward to the outline (Ts ~ 1).
+        #   Intersection is solid throughout: Ts = 0.5, W = 1, so it just
+        #     cross-fades alpha_a -> alpha_b (invisible, both are ~opaque).
+        Ts = np.full(a.shape, 0.5)
+        Ts[self.a_only] = 1.0 - depth_a[self.a_only]
+        Ts[self.b_only] = depth_b[self.b_only]
+
+        spacing = (
+            _level_spacing(Ts, self.a_only) + _level_spacing(Ts, self.b_only)
+        )
+        W = np.ones(a.shape)
+        excl = self.a_only | self.b_only
+        # Real edges set their width from the level-set spacing, giving a ~1px
+        # spatial front; the front's pixels switch in sequence, so it glides.
+        # An isolated single-pixel speck (spacing 0: no in-region neighbour) has
+        # no spatial front, so it would hard-pop on/off in one frame. Fade those
+        # over a short t-window (W_SPECK) instead. These specks are the sub-pixel
+        # leftovers of thresholding coincident outlines; softened, they vanish.
+        W_SPECK = 0.08
+        w_excl = spacing[excl] * self.aa_width
+        w_excl[w_excl <= 0.0] = W_SPECK
+        W[excl] = w_excl
+
+        # A glyph's sub-threshold outline fringe (alpha in (0, 0.5)) lies in
+        # neither filled region, so it has no schedule of its own. Give each such
+        # pixel the schedule of the nearest filled pixel, so the fringe switches
+        # together with the outline it borders -- not all at once with global t.
+        # Without this a near-vertical edge sitting just below threshold (e.g. a
+        # 'd' stem) lights up as a faint line along its whole length mid-morph.
+        filled = mask_a | mask_b
+        iy, ix = ndimage.distance_transform_edt(
+            ~filled, return_distances=False, return_indices=True
+        )
+        Ts = Ts[iy, ix]
+        W = W[iy, ix]
+
+        # Normalise each pixel's ramp by its own endpoint values so that s is
+        # *exactly* 0 at t=0 and *exactly* 1 at t=1 (clamping the raw ramp would
+        # leave the first/last pixels to switch slightly off). This makes mask(0)
+        # and mask(1) reproduce alpha_a and alpha_b to the last fringe pixel.
+        self.Ts = Ts
+        self.W = W
+        self._s0 = np.clip((0.0 - Ts) / W + 0.5, 0.0, 1.0)
+        s1 = np.clip((1.0 - Ts) / W + 0.5, 0.0, 1.0)
+        self._sden = np.maximum(s1 - self._s0, 1e-6)
 
     def mask(self, t: float) -> np.ndarray:
-        """Binary morph silhouette at parameter ``t`` in [0, 1] (0/1 float).
+        """Anti-aliased morph coverage at parameter ``t`` in [0, 1].
 
-        ``mask(0)`` is glyph A's mask and ``mask(1)`` is glyph B's. Apply easing
+        Returns a float coverage mask in [0, 1]. ``mask(0)`` is glyph A's
+        anti-aliased alpha *exactly* and ``mask(1)`` is glyph B's. Apply easing
         to ``t`` before calling for eased motion.
         """
-        present = (
-            self.inter
-            | (self.a_only & (self.T >= t))
-            | (self.b_only & (self.T <= t))
-        )
-        return present.astype(float)
+        s_raw = np.clip((t - self.Ts) / self.W + 0.5, 0.0, 1.0)
+        s = np.clip((s_raw - self._s0) / self._sden, 0.0, 1.0)
+        return (1.0 - s) * self.alpha_a + s * self.alpha_b
 
 
 def ease_in_out(s: float) -> float:
